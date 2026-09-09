@@ -48,6 +48,13 @@ app.post("/api/chat", async (request, response) => {
   }
 });
 
+app.get("/", (_request, response) => {
+  response.json({
+    message: "Fahimta AI is running!",
+    status: "online"
+  });
+});
+
 app.use((_request, response) => {
   response.status(404).json({ error: "Not found." });
 });
