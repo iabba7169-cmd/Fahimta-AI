@@ -3,10 +3,8 @@ import express from "express";
 import OpenAI from "openai";
 
 const app = express();
-
 const port = Number(process.env.PORT || 3000);
 const host = "0.0.0.0";
-
 const apiKey = process.env.OPENAI_API_KEY;
 const model = process.env.OPENAI_MODEL || "gpt-5.5";
 
@@ -18,8 +16,7 @@ if (!apiKey) {
 const client = new OpenAI({ apiKey });
 
 app.disable("x-powered-by");
-
-app.use(express.json({ limit: "32kb" }));
+app.use(express.json({ limit: "12mb" }));
 
 app.get("/", (_request, response) => {
   response.json({
@@ -43,9 +40,17 @@ app.post("/api/chat", async (request, response) => {
       ? request.body.message.trim()
       : "";
 
-  if (!message) {
+  const images = Array.isArray(request.body?.images)
+    ? request.body.images
+        .filter(
+          (item) => typeof item === "string" && item.length > 0
+        )
+        .slice(0, 10)
+    : [];
+
+  if (!message && images.length === 0) {
     return response.status(400).json({
-      error: "A message is required."
+      error: "A message or image is required."
     });
   }
 
@@ -56,18 +61,45 @@ app.post("/api/chat", async (request, response) => {
   }
 
   try {
+    const content = [];
+
+    if (message) {
+      content.push({
+        type: "input_text",
+        text: message
+      });
+    } else {
+      content.push({
+        type: "input_text",
+        text: "Please analyze the uploaded image(s) and answer helpfully."
+      });
+    }
+
+    for (const base64Image of images) {
+      content.push({
+        type: "input_image",
+        image_url: `data:image/jpeg;base64,${base64Image}`
+      });
+    }
+
     const result = await client.responses.create({
       model,
       store: false,
 
       instructions:
-        "You are Fahimta AI, a helpful and friendly learning assistant. " +
+        "You are Fahimta AI, a helpful, friendly learning assistant. " +
         "Answer clearly and accurately. " +
         "If the user writes Hausa, answer in Hausa. " +
         "If the user writes English, answer in English. " +
-        "For another language, answer in that language when possible.",
+        "For another language, answer in that language when possible. " +
+        "When images are provided, use them as visual context and explain what you can see carefully.",
 
-      input: message
+      input: [
+        {
+          role: "user",
+          content
+        }
+      ]
     });
 
     const reply = result.output_text?.trim();
@@ -84,7 +116,7 @@ app.post("/api/chat", async (request, response) => {
     }
 
     return response.status(200).json({
-      reply: reply
+      reply
     });
 
   } catch (error) {
@@ -109,6 +141,9 @@ app.use((_request, response) => {
 });
 
 app.listen(port, host, () => {
-  console.log(`Fahimta AI backend listening on ${host}:${port}`);
+  console.log(
+    `Fahimta AI backend listening on ${host}:${port}`
+  );
+
   console.log(`OpenAI model: ${model}`);
 });
