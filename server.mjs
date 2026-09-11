@@ -133,6 +133,59 @@ app.post("/api/chat", async (request, response) => {
     });
   }
 });
+// =========================
+// IMAGE GENERATION
+// =========================
+app.post("/api/image", async (request, response) => {
+  try {
+    const { prompt } = request.body;
+
+    if (!prompt || typeof prompt !== "string") {
+      return response.status(400).json({
+        error: "Prompt is required."
+      });
+    }
+
+    const result = await client.images.generate({
+      model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
+      prompt: prompt,
+      size: "1024x1024"
+    });
+
+    return response.json({
+      image: result.data?.[0]?.b64_json || null
+    });
+  } catch (error) {
+    console.error("Image generation error:", error);
+
+    return response.status(500).json({
+      error: error?.message || "Image generation failed."
+    });
+  }
+});
+app.post("/api/video", async (request, response) => {
+  try {
+    const { prompt } = request.body;
+
+    if (!prompt || typeof prompt !== "string") {
+      return response.status(400).json({
+        error: "Prompt is required."
+      });
+    }
+
+    return response.status(501).json({
+      error: "Video generation provider is not configured yet.",
+      prompt
+    });
+
+  } catch (error) {
+    console.error("Video generation error:", error);
+
+    return response.status(500).json({
+      error: error?.message || "Video generation failed."
+    });
+  }
+});
 
 app.use((_request, response) => {
   response.status(404).json({
