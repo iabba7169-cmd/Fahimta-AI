@@ -4,146 +4,168 @@ import OpenAI from "openai";
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const host = "0.0.0.0";
 
-const chatModel = process.env.OPENAI_CHAT_MODEL || "gpt-5-mini";
-const imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
-const allowedOrigins = (process.env.ALLOWED_ORIGINS || "")
-  .split(",")
-  .map((origin) => origin.trim())
-  .filter(Boolean);
+const apiKey = process.env.OPENAI_API_KEY;
+const model = process.env.OPENAI_MODEL || "gpt-5.5";
 
-const MAX_PROMPT_LENGTH = 4_000;
-const MAX_HISTORY_MESSAGES = 12;
-const WINDOW_MS = 60_000;
-const MAX_REQUESTS_PER_WINDOW = Number(process.env.MAX_REQUESTS_PER_MINUTE || 20);
-const visits = new Map();
+if (!apiKey) {
+  console.error("OPENAI_API_KEY is missing.");
+  process.exit(1);
+}
 
-app.disable("x-powered-by");
-app.use(express.json({ limit: "1mb" }));
+const client = new OpenAI({ apiKey });
 
-app.use((request, response, next) => {
-  const origin = request.get("origin");
-  if (origin && allowedOrigins.length > 0 && !allowedOrigins.includes(origin)) {
-    return response.status(403).json({ error: "This origin is not allowed." });
-  }
-  if (origin) response.setHeader("Access-Control-Allow-Origin", origin);
-  response.setHeader("Vary", "Origin");
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type");
-  response.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  if (request.method === "OPTIONS") return response.sendStatus(204);
-  return next();
+app.use(express.json({ limit: "12mb" }));
+
+app.get("/", (_request, response) => {
+  response.status(200).send("Fahimta AI backend is running.");
 });
-
-app.use((request, response, next) => {
-  const ip = request.ip || "unknown";
-  const now = Date.now();
-  const current = visits.get(ip) || { count: 0, resetAt: now + WINDOW_MS };
-  if (now >= current.resetAt) {
-    current.count = 0;
-    current.resetAt = now + WINDOW_MS;
-  }
-  current.count += 1;
-  visits.set(ip, current);
-  if (current.count > MAX_REQUESTS_PER_WINDOW) {
-    return response.status(429).json({ error: "Too many requests. Please try again shortly." });
-  }
-  return next();
-});
-
-function requiredText(value, field = "prompt") {
-  if (typeof value !== "string" || !value.trim()) {
-    const error = new Error(`${field} is required.`);
-    error.status = 400;
-    throw error;
-  }
-  const text = value.trim();
-  if (text.length > MAX_PROMPT_LENGTH) {
-    const error = new Error(`${field} is too long.`);
-    error.status = 400;
-    throw error;
-  }
-  return text;
-}
-
-function cleanHistory(messages) {
-  if (!Array.isArray(messages)) return [];
-  return messages
-    .slice(-MAX_HISTORY_MESSAGES)
-    .filter((item) => item && ["user", "assistant"].includes(item.role))
-    .map((item) => ({ role: item.role, content: requiredText(item.content, "message") }));
-}
-
-function openAIError(error, response, fallback) {
-  console.error(error);
-  const status = Number.isInteger(error?.status) ? error.status : 500;
-  const safeMessage = status >= 500 ? fallback : (error?.message || fallback);
-  return response.status(status).json({ error: safeMessage });
-}
 
 app.get("/health", (_request, response) => {
-  response.json({
-    ok: true,
-    service: "Fahimta AI",
-    chat: "ready",
-    image: "ready",
-    video: "not_configured"
-  });
+  response.status(200).json({ ok: true, service: "Fahimta-AI", model });
 });
+
+function shouldUseWebSearch(message) {
+  const text = String(message || "").toLowerCase();
+  const signals = [
+    "bincika", "binciki", "bincike", "nemo min", "duba min",
+    "tabbatar", "gaskiya ne", "latest", "current", "today",
+    "yanzu", "a yanzu", "a yau", "sabbin labarai", "labarai na yau",
+    "search", "find", "verify", "check online", "farashin yanzu",
+    "halin yanzu"
+  ];
+  return signals.some((signal) => text.includes(signal));
+}
+
+function extractCitations(result) {
+  const citations = [];
+  for (const outputItem of result.output || []) {
+    for (const contentItem of outputItem.content || []) {
+      for (const annotation of contentItem.annotations || []) {
+        if (annotation.type === "url_citation" && annotation.url) {
+          citations.push({
+            title: annotation.title || annotation.url,
+            url: annotation.url
+          });
+        }
+      }
+    }
+  }
+  const unique = [];
+  const seen = new Set();
+  for (const citation of citations) {
+    if (!seen.has(citation.url)) {
+      seen.add(citation.url);
+      unique.push(citation);
+    }
+  }
+  return unique.slice(0, 20);
+}
 
 app.post("/api/chat", async (request, response) => {
   try {
-    const message = requiredText(request.body?.message ?? request.body?.prompt, "message");
-    const history = cleanHistory(request.body?.messages);
-    const result = await openai.responses.create({
-      model: chatModel,
-      instructions: "You are Fahimta AI. Reply helpfully and clearly. Prefer Hausa when the user writes Hausa.",
-      input: [...history, { role: "user", content: message }],
-      max_output_tokens: 700
+    const { message, images } = request.body;
+
+    if (!message || typeof message !== "string") {
+      return response.status(400).json({ error: "Message is required." });
+    }
+
+    const useWebSearch = shouldUseWebSearch(message);
+
+    const content = [{ type: "input_text", text: message }];
+
+    if (Array.isArray(images)) {
+      for (const imageBase64 of images.slice(0, 10)) {
+        if (typeof imageBase64 !== "string" || !imageBase64) continue;
+        content.push({
+          type: "input_image",
+          image_url: `data:image/jpeg;base64,${imageBase64}`
+        });
+      }
+    }
+
+    const result = await client.responses.create({
+      model,
+      store: false,
+      tools: [{ type: "web_search" }],
+      tool_choice: useWebSearch ? "required" : "auto",
+      instructions:
+        "You are Fahimta AI, a helpful, friendly educational assistant. " +
+        "Answer in the same language as the user. If the user writes Hausa, answer in Hausa. " +
+        "Be clear, accurate, and practical. " +
+        "When the user asks you to search, verify information, find current information, " +
+        "or asks about recent events, use web search before answering. " +
+        "When web search is used, base current factual claims on retrieved sources. " +
+        "Do not pretend that you searched if you did not. " +
+        "If information is uncertain or unavailable, say so clearly.",
+      input: [{ role: "user", content }]
     });
-    const reply = result.output_text || "Ban samu amsa ba. Ka sake gwadawa.";
-    // Aliases avoid breaking older Android builds while they migrate to `reply`.
-    return response.json({ reply, answer: reply, response: reply });
+
+    return response.status(200).json({
+      reply: result.output_text || "Ban samu amsa daga AI ba.",
+      citations: extractCitations(result)
+    });
   } catch (error) {
-    return openAIError(error, response, "Chat request failed.");
+    console.error("CHAT ERROR:", error);
+    return response.status(500).json({
+      error: "Chat request failed.",
+      details: error?.message || String(error)
+    });
   }
 });
 
 app.post("/api/image", async (request, response) => {
   try {
-    const prompt = requiredText(request.body?.prompt);
-    const allowedSizes = new Set(["1024x1024", "1024x1536", "1536x1024"]);
-    const size = allowedSizes.has(request.body?.size) ? request.body.size : "1024x1024";
-    const result = await openai.images.generate({
-      model: imageModel,
+    const { prompt } = request.body;
+    if (!prompt || typeof prompt !== "string") {
+      return response.status(400).json({ error: "Prompt is required." });
+    }
+
+    const result = await client.images.generate({
+      model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
       prompt,
-      size
+      size: "1024x1024"
     });
-    const imageBase64 = result.data?.[0]?.b64_json;
-    if (!imageBase64) throw new Error("Image service returned no image data.");
-    // Keep both names so existing Android code that expects `image` still works.
-    return response.json({ image: imageBase64, imageBase64, mimeType: "image/png" });
+
+    const image = result.data?.[0]?.b64_json;
+    if (!image) {
+      return response.status(502).json({ error: "Image generation returned no image." });
+    }
+
+    return response.status(200).json({ image });
   } catch (error) {
-    return openAIError(error, response, "Image generation failed.");
+    console.error("IMAGE ERROR:", error);
+    return response.status(500).json({
+      error: "Image generation failed.",
+      details: error?.message || String(error)
+    });
   }
 });
 
-app.post("/api/video", (_request, response) => {
-  return response.status(501).json({
-    error: "Video generation is not configured yet.",
-    code: "VIDEO_PROVIDER_NOT_CONFIGURED"
-  });
+app.post("/api/video", async (request, response) => {
+  try {
+    const { prompt } = request.body;
+    if (!prompt || typeof prompt !== "string") {
+      return response.status(400).json({ error: "Prompt is required." });
+    }
+
+    return response.status(501).json({
+      error: "Video generation provider is not configured yet."
+    });
+  } catch (error) {
+    console.error("VIDEO ERROR:", error);
+    return response.status(500).json({
+      error: "Video generation failed.",
+      details: error?.message || String(error)
+    });
+  }
 });
 
-app.get("/api/video/status", (_request, response) => {
-  return response.status(501).json({
-    status: "not_configured",
-    code: "VIDEO_PROVIDER_NOT_CONFIGURED"
-  });
+app.use((_request, response) => {
+  response.status(404).json({ error: "Route not found." });
 });
 
-app.use((_request, response) => response.status(404).json({ error: "Not found." }));
-
-app.listen(port, "0.0.0.0", () => {
-  console.log(`Fahimta AI backend is listening on port ${port}`);
+app.listen(port, host, () => {
+  console.log(`Fahimta AI backend listening on ${host}:${port}`);
 });
