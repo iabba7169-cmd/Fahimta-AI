@@ -1,13 +1,14 @@
 import "dotenv/config";
 import express from "express";
-import OpenAI from "openai";
+import OpenAI, { toFile } from "openai";
 
 const app = express();
 const port = Number(process.env.PORT || 3000);
 const host = "0.0.0.0";
 
 const apiKey = process.env.OPENAI_API_KEY;
-const model = process.env.OPENAI_MODEL || "gpt-5.5";
+const model = process.env.OPENAI_MODEL || "gpt-5.6";
+const imageModel = process.env.OPENAI_IMAGE_MODEL || "gpt-image-2";
 
 if (!apiKey) {
   console.error("OPENAI_API_KEY is missing.");
@@ -16,14 +17,21 @@ if (!apiKey) {
 
 const client = new OpenAI({ apiKey });
 
-app.use(express.json({ limit: "12mb" }));
+app.use(express.json({ limit: "20mb" }));
 
 app.get("/", (_request, response) => {
   response.status(200).send("Fahimta AI backend is running.");
 });
 
 app.get("/health", (_request, response) => {
-  response.status(200).json({ ok: true, service: "Fahimta-AI", model });
+  response.status(200).json({
+    ok: true,
+    service: "Fahimta AI",
+    chat: "ready",
+    image: "ready",
+    image_edit: "ready",
+    video: "not_configured"
+  });
 });
 
 function shouldUseWebSearch(message) {
@@ -40,6 +48,7 @@ function shouldUseWebSearch(message) {
 
 function extractCitations(result) {
   const citations = [];
+
   for (const outputItem of result.output || []) {
     for (const contentItem of outputItem.content || []) {
       for (const annotation of contentItem.annotations || []) {
@@ -52,14 +61,17 @@ function extractCitations(result) {
       }
     }
   }
+
   const unique = [];
   const seen = new Set();
+
   for (const citation of citations) {
     if (!seen.has(citation.url)) {
       seen.add(citation.url);
       unique.push(citation);
     }
   }
+
   return unique.slice(0, 20);
 }
 
@@ -68,16 +80,18 @@ app.post("/api/chat", async (request, response) => {
     const { message, images } = request.body;
 
     if (!message || typeof message !== "string") {
-      return response.status(400).json({ error: "Message is required." });
+      return response.status(400).json({
+        error: "Message is required."
+      });
     }
 
     const useWebSearch = shouldUseWebSearch(message);
-
     const content = [{ type: "input_text", text: message }];
 
     if (Array.isArray(images)) {
       for (const imageBase64 of images.slice(0, 10)) {
         if (typeof imageBase64 !== "string" || !imageBase64) continue;
+
         content.push({
           type: "input_image",
           image_url: `data:image/jpeg;base64,${imageBase64}`
@@ -108,6 +122,7 @@ app.post("/api/chat", async (request, response) => {
     });
   } catch (error) {
     console.error("CHAT ERROR:", error);
+
     return response.status(500).json({
       error: "Chat request failed.",
       details: error?.message || String(error)
@@ -118,26 +133,89 @@ app.post("/api/chat", async (request, response) => {
 app.post("/api/image", async (request, response) => {
   try {
     const { prompt } = request.body;
+
     if (!prompt || typeof prompt !== "string") {
-      return response.status(400).json({ error: "Prompt is required." });
+      return response.status(400).json({
+        error: "Prompt is required."
+      });
     }
 
     const result = await client.images.generate({
-      model: process.env.OPENAI_IMAGE_MODEL || "gpt-image-2",
+      model: imageModel,
       prompt,
-      size: "1024x1024"
+      size: "1024x1024",
+      quality: "medium",
+      output_format: "png"
     });
 
     const image = result.data?.[0]?.b64_json;
+
     if (!image) {
-      return response.status(502).json({ error: "Image generation returned no image." });
+      return response.status(502).json({
+        error: "Image generation returned no image."
+      });
     }
 
     return response.status(200).json({ image });
   } catch (error) {
     console.error("IMAGE ERROR:", error);
+
     return response.status(500).json({
       error: "Image generation failed.",
+      details: error?.message || String(error)
+    });
+  }
+});
+
+app.post("/api/image/edit", async (request, response) => {
+  try {
+    const { image, prompt } = request.body;
+
+    if (!image || typeof image !== "string") {
+      return response.status(400).json({
+        error: "Image is required."
+      });
+    }
+
+    if (!prompt || typeof prompt !== "string") {
+      return response.status(400).json({
+        error: "Edit prompt is required."
+      });
+    }
+
+    const inputBytes = Buffer.from(image, "base64");
+
+    const inputFile = await toFile(
+      inputBytes,
+      "fahimta-input.png",
+      { type: "image/png" }
+    );
+
+    const result = await client.images.edit({
+      model: imageModel,
+      image: inputFile,
+      prompt,
+      size: "1024x1024",
+      quality: "medium",
+      output_format: "png"
+    });
+
+    const editedImage = result.data?.[0]?.b64_json;
+
+    if (!editedImage) {
+      return response.status(502).json({
+        error: "Image editing returned no image."
+      });
+    }
+
+    return response.status(200).json({
+      image: editedImage
+    });
+  } catch (error) {
+    console.error("IMAGE EDIT ERROR:", error);
+
+    return response.status(500).json({
+      error: "Image editing failed.",
       details: error?.message || String(error)
     });
   }
@@ -146,8 +224,11 @@ app.post("/api/image", async (request, response) => {
 app.post("/api/video", async (request, response) => {
   try {
     const { prompt } = request.body;
+
     if (!prompt || typeof prompt !== "string") {
-      return response.status(400).json({ error: "Prompt is required." });
+      return response.status(400).json({
+        error: "Prompt is required."
+      });
     }
 
     return response.status(501).json({
@@ -155,6 +236,7 @@ app.post("/api/video", async (request, response) => {
     });
   } catch (error) {
     console.error("VIDEO ERROR:", error);
+
     return response.status(500).json({
       error: "Video generation failed.",
       details: error?.message || String(error)
@@ -163,7 +245,9 @@ app.post("/api/video", async (request, response) => {
 });
 
 app.use((_request, response) => {
-  response.status(404).json({ error: "Route not found." });
+  response.status(404).json({
+    error: "Route not found."
+  });
 });
 
 app.listen(port, host, () => {
