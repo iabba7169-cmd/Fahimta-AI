@@ -238,6 +238,17 @@ app.post("/api/video", async (request, response) => {
       });
     }
 
+    const originalPrompt = prompt.trim();
+
+    // Make human/people requests explicit so the video model does not omit
+    // the requested people. We preserve the user's original idea and only
+    // add visual composition guidance when people are requested.
+    const peopleRequested = /\b(mutane|mutanen|namiji|mazan|miji|man|men|people|person|persons|human|humans|guy|guys|boy|boys|adult men|adult man|wrestl|kokowa|kokawa|fada)\b/i.test(originalPrompt);
+
+    const videoPrompt = peopleRequested
+      ? `${originalPrompt}. IMPORTANT VISUAL REQUIREMENT: Clearly show the requested people as the main subjects. Use several clearly visible adult men when the request refers to men, with their full bodies and faces visible in the scene. Keep the people in the center/foreground, large enough to be unmistakable, and keep them continuously visible for most of the 5-second clip. Do not replace them with scenery, silhouettes, empty backgrounds, objects, or animals. If the request is wrestling/kokowa, depict a non-graphic sports-style wrestling scene.`
+      : originalPrompt;
+
     const startResponse = await fetch("https://api.x.ai/v1/videos/generations", {
       method: "POST",
       headers: {
@@ -246,7 +257,7 @@ app.post("/api/video", async (request, response) => {
       },
       body: JSON.stringify({
         model: "grok-imagine-video-1.5",
-        prompt: prompt.trim(),
+        prompt: videoPrompt,
         duration: 5,
         aspect_ratio: "16:9",
         resolution: "720p"
@@ -287,7 +298,8 @@ app.post("/api/video", async (request, response) => {
         return response.status(200).json({
           video: pollData.video.url,
           duration: pollData.video.duration,
-          model: pollData.model || "grok-imagine-video-1.5"
+          model: pollData.model || "grok-imagine-video-1.5",
+          prompt: originalPrompt
         });
       }
 
