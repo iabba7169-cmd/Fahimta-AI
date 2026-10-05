@@ -30,7 +30,7 @@ app.get("/health", (_request, response) => {
     chat: "ready",
     image: "ready",
     image_edit: "ready",
-    video: "not_configured"
+    video: process.env.XAI_API_KEY ? "ready" : "not_configured"
   });
 });
 
@@ -231,8 +231,75 @@ app.post("/api/video", async (request, response) => {
       });
     }
 
-    return response.status(501).json({
-      error: "Video generation provider is not configured yet."
+    const xaiKey = process.env.XAI_API_KEY;
+    if (!xaiKey) {
+      return response.status(503).json({
+        error: "Video service is not configured on the server."
+      });
+    }
+
+    const startResponse = await fetch("https://api.x.ai/v1/videos/generations", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${xaiKey}`
+      },
+      body: JSON.stringify({
+        model: "grok-imagine-video-1.5",
+        prompt: prompt.trim(),
+        duration: 5,
+        aspect_ratio: "16:9",
+        resolution: "720p"
+      })
+    });
+
+    const startData = await startResponse.json();
+    if (!startResponse.ok || !startData.request_id) {
+      return response.status(502).json({
+        error: startData?.error?.message || startData?.error || "xAI video request failed."
+      });
+    }
+
+    const requestId = startData.request_id;
+    const deadline = Date.now() + 8 * 60 * 1000;
+
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      const pollResponse = await fetch(
+        `https://api.x.ai/v1/videos/${encodeURIComponent(requestId)}`,
+        {
+          headers: {
+            "Authorization": `Bearer ${xaiKey}`
+          }
+        }
+      );
+
+      const pollData = await pollResponse.json();
+
+      if (!pollResponse.ok) {
+        return response.status(502).json({
+          error: pollData?.error?.message || pollData?.error || "xAI video status request failed."
+        });
+      }
+
+      if (pollData.status === "done" && pollData.video?.url) {
+        return response.status(200).json({
+          video: pollData.video.url,
+          duration: pollData.video.duration,
+          model: pollData.model || "grok-imagine-video-1.5"
+        });
+      }
+
+      if (pollData.status === "failed" || pollData.status === "expired") {
+        return response.status(502).json({
+          error: `Video generation ${pollData.status}.`
+        });
+      }
+    }
+
+    return response.status(504).json({
+      error: "Video generation timed out. Please try again."
     });
   } catch (error) {
     console.error("VIDEO ERROR:", error);
